@@ -29,7 +29,9 @@ jobs:
           sleep 1
           sudo safaridriver --enable
           open -a Safari
-          sleep 20
+          sleep 45
+          killall Safari || true
+          sleep 5
       - name: Safari as it stands
         run: python3 drive.py /usr/bin/safaridriver http://localhost:8000/probe.html as-it-stands | tee as-it-stands.json
         continue-on-error: true
@@ -41,6 +43,12 @@ jobs:
           killall Safari com.apple.WebKit.GPU 2>/dev/null || true
           python3 drive.py /usr/bin/safaridriver http://localhost:8000/probe.html with-setting | tee with-setting.json
         continue-on-error: true
+      - name: What the driver logged
+        if: always()
+        run: |
+          defaults read com.apple.Safari AllowRemoteAutomation || true
+          ls -la ~/Library/Logs/com.apple.WebDriver 2>/dev/null || true
+          find ~/Library/Logs/com.apple.WebDriver -type f -name '*.txt' -exec tail -n 60 {} + 2>/dev/null | tail -n 200 || true
       - uses: actions/upload-artifact@v5
         with:
           name: probe-${{ matrix.runner }}

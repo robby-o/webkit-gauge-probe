@@ -31,7 +31,7 @@ def main() -> int:
         print(__doc__)
         return 2
     driver_path, url, label = sys.argv[1:]
-    driver = subprocess.Popen([driver_path, "-p", str(PORT)])
+    driver = subprocess.Popen([driver_path, "-p", str(PORT), "--diagnose"])
     result: dict = {"label": label}
     try:
         for _ in range(50):
