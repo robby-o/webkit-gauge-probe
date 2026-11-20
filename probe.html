@@ -1,0 +1,130 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>webkit-gauge probe</title>
+<script type="module">
+const VALID = `
+struct Frame { tint: vec4f }
+@group(0) @binding(0) var<uniform> frame: Frame;
+@vertex fn corner(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+  let uv = vec2f(f32((index << 1u) & 2u), f32(index & 2u));
+  return vec4f(uv * 2.0 - 1.0, 0.0, 1.0);
+}
+@fragment fn shade() -> @location(0) vec4f { return frame.tint; }
+`;
+
+const TEXTURE_IN_LET = `
+@group(0) @binding(0) var surface: texture_2d<f32>;
+@group(0) @binding(1) var filtering: sampler;
+@fragment fn shade(@location(0) uv: vec2f) -> @location(0) vec4f {
+  let held = surface;
+  return textureSample(held, filtering, uv);
+}
+`;
+
+const OVERRIDES = `
+override USED: bool;
+override UNUSED: bool;
+@vertex fn corner(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+  return vec4f(f32(index), 0.0, 0.0, 1.0);
+}
+@fragment fn shade() -> @location(0) vec4f { return vec4f(f32(USED)); }
+`;
+
+const DEPTH_ONLY = `
+@vertex fn corner(@builtin(vertex_index) index: u32) -> @builtin(position) vec4f {
+  return vec4f(f32(index), 0.0, 0.5, 1.0);
+}
+`;
+
+async function scoped(device, work) {
+  device.pushErrorScope("validation");
+  let thrown = null;
+  let value;
+  try {
+    value = await work();
+  } catch (error) {
+    thrown = `${error.name}: ${error.message}`;
+  }
+  const error = await device.popErrorScope();
+  return { thrown, validation: error ? error.message : null, value: value ?? null };
+}
+
+async function moduleCase(device, code) {
+  let messages = [];
+  const outcome = await scoped(device, async () => {
+    const module = device.createShaderModule({ code });
+    const info = await module.getCompilationInfo();
+    messages = info.messages.map((m) => ({ type: m.type, line: m.lineNum, column: m.linePos, text: m.message }));
+  });
+  return { ...outcome, messages };
+}
+
+async function pipelineCase(device, code, constants) {
+  return scoped(device, async () => {
+    const module = device.createShaderModule({ code });
+    await device.createRenderPipelineAsync({
+      layout: "auto",
+      vertex: { module, entryPoint: "corner" },
+      fragment: { module, entryPoint: "shade", targets: [{ format: "bgra8unorm" }], constants },
+    });
+  });
+}
+
+async function bundleCase(device) {
+  return scoped(device, async () => {
+    const module = device.createShaderModule({ code: DEPTH_ONLY });
+    const pipeline = await device.createRenderPipelineAsync({
+      layout: "auto",
+      vertex: { module, entryPoint: "corner" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled: true, depthCompare: "less" },
+    });
+    const encoder = device.createRenderBundleEncoder({ colorFormats: [], depthStencilFormat: "depth24plus" });
+    encoder.setPipeline(pipeline);
+    encoder.draw(3);
+    encoder.finish();
+  });
+}
+
+async function probe() {
+  const report = { agent: navigator.userAgent, gpu: "gpu" in navigator && navigator.gpu !== null };
+  if (!report.gpu) {
+    return report;
+  }
+  const adapter = await navigator.gpu.requestAdapter();
+  report.adapter = adapter !== null;
+  if (adapter === null) {
+    return report;
+  }
+  const info = adapter.info;
+  report.info = {
+    vendor: info.vendor,
+    architecture: info.architecture,
+    device: info.device,
+    description: info.description,
+    isFallbackAdapter: info.isFallbackAdapter,
+  };
+  report.features = [...adapter.features].sort();
+  report.limits = Object.fromEntries(
+    ["maxBindGroups", "maxBindGroupsPlusVertexBuffers", "maxVertexBuffers", "maxComputeWorkgroupStorageSize"].map(
+      (name) => [name, adapter.limits[name]],
+    ),
+  );
+  report.languages = [...navigator.gpu.wgslLanguageFeatures].sort();
+  const device = await adapter.requestDevice();
+  const uncaptured = [];
+  device.addEventListener("uncapturederror", (event) => uncaptured.push(event.error.message));
+  report.cases = {
+    "valid-module": await moduleCase(device, VALID),
+    "texture-in-let": await moduleCase(device, TEXTURE_IN_LET),
+    "valid-pipeline": await pipelineCase(device, VALID, {}),
+    "constant-used": await pipelineCase(device, OVERRIDES, { USED: 1 }),
+    "constant-unused-given": await pipelineCase(device, OVERRIDES, { USED: 1, UNUSED: 1 }),
+    "constant-missing": await pipelineCase(device, OVERRIDES, {}),
+    "depth-only-in-bundle": await bundleCase(device),
+  };
+  report.uncaptured = uncaptured;
+  return report;
+}
+
+window.probed = probe().catch((error) => ({ failed: `${error.name}: ${error.message}` }));
+</script>
