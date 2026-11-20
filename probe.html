@@ -36,6 +36,13 @@ const DEPTH_ONLY = `
 }
 `;
 
+const DRAWN = `
+@vertex fn corner(@location(0) place: vec4f, @location(1) uv: vec2f) -> @builtin(position) vec4f {
+  return place + vec4f(uv, 0.0, 0.0);
+}
+@fragment fn shade() -> @location(0) vec4f { return vec4f(1.0); }
+`;
+
 async function scoped(device, work) {
   device.pushErrorScope("validation");
   let thrown = null;
@@ -85,6 +92,157 @@ async function bundleCase(device) {
   });
 }
 
+// One pass with one pipeline set, and what the case does after: Safari's answer comes when the encoder finishes.
+function passed(device, pipelineOf, attachments, act) {
+  return scoped(device, async () => {
+    const encoder = device.createCommandEncoder();
+    const pass = encoder.beginRenderPass(attachments);
+    pass.setPipeline(pipelineOf());
+    act?.(pass);
+    pass.end();
+    encoder.finish();
+  });
+}
+
+async function passAndDrawCases(device) {
+  const attachment = (format) =>
+    device.createTexture({ size: [4, 4], format, usage: GPUTextureUsage.RENDER_ATTACHMENT }).createView();
+  const color = { colorAttachments: [{ view: attachment("bgra8unorm"), loadOp: "clear", storeOp: "store" }] };
+  const depth = (format, readOnly) => ({
+    colorAttachments: [],
+    depthStencilAttachment: readOnly
+      ? { view: attachment(format), depthReadOnly: true }
+      : { view: attachment(format), depthClearValue: 1, depthLoadOp: "clear", depthStoreOp: "store" },
+  });
+  const depthModule = device.createShaderModule({ code: DEPTH_ONLY });
+  const depthOnly = (label, depthWriteEnabled) => () =>
+    device.createRenderPipeline({
+      label,
+      layout: "auto",
+      vertex: { module: depthModule, entryPoint: "corner" },
+      depthStencil: { format: "depth24plus", depthWriteEnabled, depthCompare: "less" },
+    });
+
+  const VERTEX = GPUShaderStage.VERTEX;
+  const FRAGMENT = GPUShaderStage.FRAGMENT;
+  const buffer = (binding, visibility) => ({ binding, visibility, buffer: {} });
+  const sampler = (binding, visibility) => ({ binding, visibility, sampler: {} });
+  const layoutOf = (entries) => device.createBindGroupLayout({ entries });
+  const camera = layoutOf([buffer(0, VERTEX), sampler(1, FRAGMENT)]);
+  const otherOrder = layoutOf([sampler(1, FRAGMENT), buffer(0, VERTEX)]);
+  const fragmentSeen = layoutOf([buffer(0, FRAGMENT), sampler(1, FRAGMENT)]);
+  const oneMore = layoutOf([buffer(0, VERTEX), sampler(1, FRAGMENT), sampler(2, FRAGMENT)]);
+  const uniform = device.createBuffer({ size: 16, usage: GPUBufferUsage.UNIFORM });
+  const filtering = device.createSampler();
+  const groupOf = (layout, bindings) =>
+    device.createBindGroup({
+      layout,
+      entries: bindings.map((binding) => ({ binding, resource: binding === 0 ? { buffer: uniform } : filtering })),
+    });
+  const groups = {
+    camera: groupOf(camera, [0, 1]),
+    otherOrder: groupOf(otherOrder, [0, 1]),
+    fragmentSeen: groupOf(fragmentSeen, [0, 1]),
+    oneMore: groupOf(oneMore, [0, 1, 2]),
+  };
+  const oneGroup = device.createPipelineLayout({ bindGroupLayouts: [camera] });
+  const twoGroups = device.createPipelineLayout({ bindGroupLayouts: [camera, camera] });
+  const drawnModule = device.createShaderModule({ code: DRAWN });
+  const strips = (label, layout) => () =>
+    device.createRenderPipeline({
+      label,
+      layout,
+      vertex: {
+        module: drawnModule,
+        entryPoint: "corner",
+        buffers: [
+          { arrayStride: 16, attributes: [{ format: "float32x4", offset: 0, shaderLocation: 0 }] },
+          null,
+          { arrayStride: 8, attributes: [] },
+          { arrayStride: 8, attributes: [{ format: "float32x2", offset: 0, shaderLocation: 1 }] },
+        ],
+      },
+      fragment: { module: drawnModule, entryPoint: "shade", targets: [{ format: "bgra8unorm" }] },
+      primitive: { topology: "triangle-strip", stripIndexFormat: "uint16" },
+    });
+  const vertices = device.createBuffer({ size: 64, usage: GPUBufferUsage.VERTEX });
+  const indexes = device.createBuffer({ size: 16, usage: GPUBufferUsage.INDEX });
+  const indirect = device.createBuffer({ size: 32, usage: GPUBufferUsage.INDIRECT });
+  const both = (pass) => {
+    pass.setVertexBuffer(0, vertices);
+    pass.setVertexBuffer(3, vertices);
+  };
+  const drawn = (label, act, layout = oneGroup) => passed(device, strips(label, layout), color, act);
+
+  return {
+    "pass-no-fragment-on-colour": await passed(device, depthOnly("pass-no-fragment-on-colour", true), color),
+    "pass-depth-of-another-format": await passed(device, depthOnly("pass-depth-of-another-format", true), depth("depth32float", false)),
+    "pass-read-only-depth-writing": await passed(device, depthOnly("pass-read-only-depth-writing", true), depth("depth24plus", true)),
+    "pass-read-only-depth-not-writing": await passed(device, depthOnly("pass-read-only-depth-not-writing", false), depth("depth24plus", true)),
+    "pass-depth-matching": await passed(device, depthOnly("pass-depth-matching", true), depth("depth24plus", false)),
+    "draw-fits": await drawn("draw-fits", (pass) => {
+      pass.setBindGroup(0, groups.camera);
+      both(pass);
+      pass.draw(3);
+    }),
+    "draw-layout-in-other-order": await drawn("draw-layout-in-other-order", (pass) => {
+      pass.setBindGroup(0, groups.otherOrder);
+      both(pass);
+      pass.draw(3);
+    }),
+    "draw-layout-other-visibility": await drawn("draw-layout-other-visibility", (pass) => {
+      pass.setBindGroup(0, groups.fragmentSeen);
+      both(pass);
+      pass.draw(3);
+    }),
+    "draw-layout-one-more-entry": await drawn("draw-layout-one-more-entry", (pass) => {
+      pass.setBindGroup(0, groups.oneMore);
+      both(pass);
+      pass.draw(3);
+    }),
+    "draw-no-group": await drawn("draw-no-group", (pass) => {
+      both(pass);
+      pass.draw(3);
+    }),
+    "draw-buffer-missing": await drawn("draw-buffer-missing", (pass) => {
+      pass.setBindGroup(0, groups.camera);
+      pass.setVertexBuffer(0, vertices);
+      pass.draw(3);
+    }),
+    "draw-indexed-no-index-buffer": await drawn("draw-indexed-no-index-buffer", (pass) => {
+      pass.setBindGroup(0, groups.camera);
+      both(pass);
+      pass.drawIndexed(3);
+    }),
+    "draw-indexed-other-strip-format": await drawn("draw-indexed-other-strip-format", (pass) => {
+      pass.setBindGroup(0, groups.camera);
+      both(pass);
+      pass.setIndexBuffer(indexes, "uint32");
+      pass.drawIndexed(3);
+    }),
+    "draw-one-group-of-two": await drawn(
+      "draw-one-group-of-two",
+      (pass) => {
+        pass.setBindGroup(0, groups.camera);
+        both(pass);
+        pass.draw(3);
+      },
+      twoGroups,
+    ),
+    "draw-indexed-indirect-other-strip-format": await drawn("draw-indexed-indirect-other-strip-format", (pass) => {
+      pass.setBindGroup(0, groups.camera);
+      both(pass);
+      pass.setIndexBuffer(indexes, "uint32");
+      pass.drawIndexedIndirect(indirect, 0);
+    }),
+    "draw-indexed-indirect-no-index-buffer": await drawn("draw-indexed-indirect-no-index-buffer", (pass) => {
+      pass.setBindGroup(0, groups.camera);
+      both(pass);
+      pass.drawIndexedIndirect(indirect, 0);
+    }),
+  };
+}
+
 async function probe() {
   const report = { agent: navigator.userAgent, gpu: "gpu" in navigator && navigator.gpu !== null };
   if (!report.gpu) {
@@ -122,6 +280,11 @@ async function probe() {
     "constant-missing": await pipelineCase(device, OVERRIDES, {}),
     "depth-only-in-bundle": await bundleCase(device),
   };
+  try {
+    Object.assign(report.cases, await passAndDrawCases(device));
+  } catch (error) {
+    report.passAndDrawFailed = `${error.name}: ${error.message}`;
+  }
   report.uncaptured = uncaptured;
   return report;
 }

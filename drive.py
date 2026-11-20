@@ -40,8 +40,12 @@ def main() -> int:
                 break
             except OSError:
                 time.sleep(0.2)
-        session = call("POST", "/session", {"capabilities": {"alwaysMatch": {}}})
-        value = session.get("value", {})
+        value: dict = {}
+        for _ in range(3):
+            value = call("POST", "/session", {"capabilities": {"alwaysMatch": {}}}).get("value", {})
+            if "sessionId" in value:
+                break
+            time.sleep(10)
         if "sessionId" not in value:
             result["failed"] = value
             return 1
