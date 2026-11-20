@@ -1,8 +1,6 @@
 name: probe
 on:
   workflow_dispatch:
-  push:
-    branches: [main]
 
 permissions:
   contents: read
@@ -12,7 +10,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-26, macos-15, macos-14]
+        runner: [macos-26]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
