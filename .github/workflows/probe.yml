@@ -12,7 +12,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        runner: [macos-26-intel, macos-26]
+        runner: [macos-26, macos-15, macos-14]
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 25
     steps:
@@ -28,10 +28,6 @@ jobs:
           python3 -m http.server 8000 --bind 127.0.0.1 >/dev/null 2>&1 &
           sleep 1
           sudo safaridriver --enable
-          open -a Safari
-          sleep 45
-          killall Safari || true
-          sleep 5
       - name: Safari as it stands
         run: python3 drive.py /usr/bin/safaridriver http://localhost:8000/probe.html as-it-stands | tee as-it-stands.json
         continue-on-error: true
